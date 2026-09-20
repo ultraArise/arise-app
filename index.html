@@ -9,6 +9,77 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
 <script src="https://unpkg.com/lucide@0.383.0/dist/umd/lucide.js"></script>
+<script type="module">
+/* =========================================================
+   Lokales Sprachmodell (WebLLM/Llama-3.2-1B) — läuft komplett
+   im Browser via WebGPU. Kein Server, kein API-Key, kein
+   Datenversand. Wird per window.ariseLLM vom Hauptskript aus
+   angesteuert. Lädt nichts automatisch — nur auf Nutzerwunsch
+   (Modell ist ~880 MB, einmaliger Download, danach gecacht).
+========================================================= */
+import { CreateMLCEngine } from "https://esm.run/@mlc-ai/web-llm";
+
+const ARISE_LLM_MODEL_ID = "Llama-3.2-1B-Instruct-q4f16_1-MLC";
+let engine = null;
+let loadingPromise = null;
+
+window.ariseLLM = {
+  status: 'idle', // idle | loading | ready | unavailable | error
+  progressText: '',
+  async isSupported(){
+    if(!('gpu' in navigator)) return false;
+    try{
+      const adapter = await navigator.gpu.requestAdapter();
+      return !!adapter;
+    }catch(e){ return false; }
+  },
+  async load(onProgress){
+    if(engine) return true;
+    if(loadingPromise) return loadingPromise;
+    window.ariseLLM.status = 'loading';
+    loadingPromise = (async ()=>{
+      try{
+        engine = await CreateMLCEngine(ARISE_LLM_MODEL_ID, {
+          initProgressCallback: (p)=>{
+            window.ariseLLM.progressText = (p && p.text) ? p.text : '';
+            if(onProgress) onProgress(p);
+          }
+        });
+        window.ariseLLM.status = 'ready';
+        return true;
+      }catch(e){
+        console.error('WebLLM Laden fehlgeschlagen', e);
+        window.ariseLLM.status = 'error';
+        return false;
+      }
+    })();
+    return loadingPromise;
+  },
+  async chatJSON(systemPrompt, userText){
+    if(!engine) throw new Error('Modell nicht geladen');
+    const res = await engine.chat.completions.create({
+      messages: [
+        { role:'system', content: systemPrompt },
+        { role:'user', content: userText }
+      ],
+      response_format: { type:'json_object' },
+      temperature: 0.15
+    });
+    return res.choices[0].message.content;
+  },
+  async chatText(systemPrompt, userText){
+    if(!engine) throw new Error('Modell nicht geladen');
+    const res = await engine.chat.completions.create({
+      messages: [
+        { role:'system', content: systemPrompt },
+        { role:'user', content: userText }
+      ],
+      temperature: 0.7
+    });
+    return res.choices[0].message.content;
+  }
+};
+</script>
 <style>
 :root{
   --bg:#0B110D;
@@ -2492,6 +2563,8 @@ function renderJarvis(){
       </div>
     </div>
 
+    ${jarvisModelCardHtml()}
+
     ${chat.messages.length===0 ? `
       <div class="section" style="text-align:center;padding:14px 10px 6px;">
         <div class="list-row-icon" style="width:48px;height:48px;margin:0 auto 14px;background:var(--primary-dark);color:var(--olive-light);"><i data-lucide="sparkles"></i></div>
@@ -2517,6 +2590,62 @@ function renderJarvis(){
       <button class="jarvis-send-btn" onclick="sendJarvisMessageFromInput()" ${jarvisSending?'disabled':''} aria-label="Send"><i data-lucide="arrow-up"></i></button>
     </div>
   `;
+}
+
+/* ---- Lokales KI-Modell: UI-Karte + Ladevorgang ---- */
+let jarvisModelLoadPct = 0;
+function jarvisModelCardHtml(){
+  if(typeof window.ariseLLM === 'undefined'){
+    return ''; // Modul konnte nicht geladen werden (z.B. offline beim allerersten Laden) — JARVIS läuft trotzdem, nur ohne LLM
+  }
+  const status = window.ariseLLM.status;
+  if(status === 'ready'){
+    return `<div class="small" style="margin:-6px 0 16px;display:flex;align-items:center;gap:6px;color:var(--olive-light);"><i data-lucide="brain-circuit" style="width:14px;height:14px;"></i>Lokales KI-Modell aktiv — versteht freie Sprache</div>`;
+  }
+  if(status === 'loading'){
+    return `
+      <div class="card card-sm section" style="margin-top:0;">
+        <div class="row" style="margin-bottom:8px;">
+          <div class="small" style="font-weight:600;">KI-Modell wird geladen…</div>
+          <div class="small">${jarvisModelLoadPct}%</div>
+        </div>
+        <div class="progress-track"><div class="progress-fill" style="width:${jarvisModelLoadPct}%"></div></div>
+        <div class="small" style="margin-top:8px;">${escapeHtml(window.ariseLLM.progressText || 'Bitte warten…')}</div>
+      </div>`;
+  }
+  if(status === 'error'){
+    return `<div class="small" style="margin:-6px 0 16px;color:var(--text2);">KI-Modell konnte nicht geladen werden — JARVIS läuft im einfacheren Regel-Modus weiter.</div>`;
+  }
+  // idle
+  return `
+    <div class="card card-sm section" style="margin-top:0;">
+      <div class="row" style="align-items:flex-start;">
+        <div style="flex:1;">
+          <div style="font-size:14px;font-weight:600;margin-bottom:4px;">Lokales KI-Modell laden</div>
+          <div class="small" style="line-height:1.5;">Versteht freie Sprache statt fester Befehle. ~880 MB, einmaliger Download, läuft danach komplett offline auf diesem Gerät. Kein Account, kein API-Key.</div>
+        </div>
+      </div>
+      <button class="btn btn-secondary btn-block" style="margin-top:12px;" onclick="loadJarvisModel()"><i data-lucide="download"></i>Modell laden</button>
+    </div>`;
+}
+async function loadJarvisModel(){
+  if(typeof window.ariseLLM === 'undefined'){ toast('KI-Modell-Modul nicht verfügbar', 'error'); return; }
+  const supported = await window.ariseLLM.isSupported();
+  if(!supported){
+    window.ariseLLM.status = 'error';
+    render();
+    toast('Dieses Gerät/dieser Browser unterstützt WebGPU nicht', 'error');
+    return;
+  }
+  render(); // zeigt sofort den Lade-Status
+  await window.ariseLLM.load((p)=>{
+    if(p && typeof p.progress === 'number'){ jarvisModelLoadPct = Math.round(p.progress*100); }
+    if(currentView==='jarvis') render();
+  });
+  jarvisModelLoadPct = 100;
+  render();
+  if(window.ariseLLM.status==='ready'){ toast('KI-Modell geladen'); }
+  else { toast('KI-Modell konnte nicht geladen werden', 'error'); }
 }
 
 function jarvisMessageHtml(m){
@@ -2633,7 +2762,7 @@ function jarvisGuessMealFromTime(){
   return 'snacks';
 }
 
-function classifyJarvisIntent(rawText){
+function classifyJarvisIntentRegex(rawText){
   const text = rawText.trim();
   const low = text.toLowerCase();
 
@@ -2669,9 +2798,8 @@ function classifyJarvisIntent(rawText){
   return { intent:'UNKNOWN' };
 }
 
-async function handleTrackFoodIntent(strippedText, mealHint){
+async function trackFoodSegments(segments, mealHint){
   const meal = mealHint || jarvisGuessMealFromTime();
-  const segments = parseFoodText(strippedText);
   if(!segments.length) return 'Ich konnte darin keine Lebensmittel mit Menge erkennen. Versuch es z. B. so: "200g Reis" oder "2 Eier und eine Banane".';
   const log = getTodayLog();
   const lines = [];
@@ -2697,6 +2825,10 @@ async function handleTrackFoodIntent(strippedText, mealHint){
   const totals = computeNutritionTotals(getTodayLog());
   const mealLabel = MEALS.find(m=>m.key===meal).label;
   return `Eingetragen bei **${mealLabel}**:\n${lines.join('\n')}\n\nTagesgesamt: ${Math.round(totals.calories)} kcal · P ${Math.round(totals.protein)}g · C ${Math.round(totals.carbs)}g · F ${Math.round(totals.fat)}g`;
+}
+async function handleTrackFoodIntent(strippedText, mealHint){
+  const segments = parseFoodText(strippedText);
+  return await trackFoodSegments(segments, mealHint);
 }
 
 function handleDeleteFoodIntent(query){
@@ -2781,8 +2913,75 @@ function handleHelpIntent(){
   return 'Ich laufe komplett lokal auf diesem Gerät — kein API-Key, keine KI-Cloud. Ich kann:\n• Essen eintragen: „2 Eier und eine Banane gegessen"\n• „Was habe ich heute gegessen?"\n• „Wie viele Kalorien habe ich heute?"\n• „Was habe ich heute trainiert?"\n• „Wie war meine Woche?"\n• „Lösche Banane"\n• „Wie viele Kalorien hat Reis?"';
 }
 
+/* =========================================================
+   LLM-gestütztes Verständnis (optional) — nutzt das lokale
+   WebLLM-Modell (falls geladen), um Intent + Details aus
+   freier Sprache zu extrahieren. Führt NIE selbst Aktionen
+   aus oder erfindet Werte — liefert nur strukturierte Daten,
+   die exakt dieselben deterministischen Handler-Funktionen
+   ausführen wie beim Regex-Fallback. Schlägt die Erkennung
+   fehl oder ist kein Modell geladen, greift automatisch der
+   Regex-Parser (classifyJarvisIntentRegex) — JARVIS funktioniert
+   also so oder so.
+========================================================= */
+const JARVIS_LLM_SYSTEM_PROMPT = `Du bist der Intent-Klassifizierer einer Fitness-App namens ARISE. Antworte AUSSCHLIESSLICH mit einem einzigen JSON-Objekt, kein Fließtext, keine Erklärung.
+Felder:
+- intent: einer von TRACK_FOOD, GET_TODAY_FOOD, GET_TODAY_NUTRITION, GET_TODAY_TRAINING, GET_WEEK_SUMMARY, DELETE_FOOD, SEARCH_FOOD, HELP, CHAT
+- Bei TRACK_FOOD zusätzlich: items (Liste von {"query": Lebensmittelname, "amount": Zahl, "unit": "g" oder "stück"}), optional mealHint ("breakfast"/"lunch"/"dinner"/"snacks" falls explizit erwähnt)
+- Bei DELETE_FOOD oder SEARCH_FOOD zusätzlich: query (der Lebensmittelname)
+- CHAT: für alles, was keine der obigen Aktionen ist (Smalltalk, allgemeine Fragen zu Training/Ernährung/Motivation, Erklärungen)
+Beispiele:
+"Ich habe 2 Eier und eine Banane gegessen" -> {"intent":"TRACK_FOOD","items":[{"query":"Ei","amount":2,"unit":"stück"},{"query":"Banane","amount":1,"unit":"stück"}]}
+"Füge 200g Reis zum Mittag hinzu" -> {"intent":"TRACK_FOOD","items":[{"query":"Reis","amount":200,"unit":"g"}],"mealHint":"lunch"}
+"Was habe ich heute gegessen?" -> {"intent":"GET_TODAY_FOOD"}
+"Wie viele Kalorien habe ich heute?" -> {"intent":"GET_TODAY_NUTRITION"}
+"Was habe ich heute trainiert?" -> {"intent":"GET_TODAY_TRAINING"}
+"Wie war meine Woche?" -> {"intent":"GET_WEEK_SUMMARY"}
+"Lösche die Banane" -> {"intent":"DELETE_FOOD","query":"Banane"}
+"Wie viele Kalorien hat Reis?" -> {"intent":"SEARCH_FOOD","query":"Reis"}
+"Erkläre mir progressive Overload" -> {"intent":"CHAT"}
+"Hallo" -> {"intent":"CHAT"}`;
+
+const JARVIS_CHAT_SYSTEM_PROMPT = `Du bist JARVIS, der persönliche Assistent in der Fitness-App ARISE. Ruhig, freundlich, präzise, motivierend, kein übertriebener Enthusiasmus, keine Emoji-Ketten. Du läufst komplett lokal auf dem Gerät des Nutzers, ohne Internet-KI. Du hast KEINEN Zugriff auf die echten Trainings-, Ernährungs- oder Zieldaten des Nutzers in diesem Gespräch — erfinde niemals konkrete Zahlen, Werte oder Fakten über den Nutzer. Für Fragen zu seinen echten Daten (Kalorien, Training, Fortschritt) sag freundlich, dass er das direkt fragen soll (z. B. "Was habe ich heute gegessen?"), statt selbst zu spekulieren. Antworte kurz und auf Deutsch. Keine medizinischen Diagnosen.`;
+
+async function classifyJarvisIntentLLM(rawText){
+  const raw = await window.ariseLLM.chatJSON(JARVIS_LLM_SYSTEM_PROMPT, rawText);
+  let parsed;
+  try{ parsed = JSON.parse(raw); }catch(e){ throw new Error('LLM lieferte kein gültiges JSON'); }
+  if(!parsed || typeof parsed.intent !== 'string') throw new Error('LLM-Antwort ohne intent');
+  return parsed;
+}
+
 async function processJarvisMessage(rawText){
-  const parsed = classifyJarvisIntent(rawText);
+  const llmReady = (typeof window.ariseLLM !== 'undefined') && window.ariseLLM.status === 'ready';
+
+  if(llmReady){
+    try{
+      const parsed = await classifyJarvisIntentLLM(rawText);
+      switch(parsed.intent){
+        case 'HELP': return handleHelpIntent();
+        case 'GET_WEEK_SUMMARY': return handleGetWeekSummaryIntent();
+        case 'GET_TODAY_TRAINING': return handleGetTodayTrainingIntent();
+        case 'GET_TODAY_NUTRITION': return handleGetTodayNutritionIntent();
+        case 'GET_TODAY_FOOD': return handleGetTodayFoodIntent();
+        case 'DELETE_FOOD': return handleDeleteFoodIntent(parsed.query || '');
+        case 'SEARCH_FOOD': return await handleSearchFoodIntent(parsed.query || '');
+        case 'TRACK_FOOD': {
+          const items = Array.isArray(parsed.items) ? parsed.items : [];
+          const segments = items.map(it=>({ foodQuery: it.query, amount: Number(it.amount)||null, unit: (it.unit==='g'||it.unit==='stück') ? it.unit : null }));
+          return await trackFoodSegments(segments.filter(s=>s.foodQuery && s.amount && s.unit), parsed.mealHint || null);
+        }
+        case 'CHAT':
+        default:
+          return await window.ariseLLM.chatText(JARVIS_CHAT_SYSTEM_PROMPT, rawText);
+      }
+    }catch(e){
+      console.warn('LLM-Verständnis fehlgeschlagen, nutze Regel-Fallback:', e);
+      // fällt unten durch auf den Regex-Pfad
+    }
+  }
+
+  const parsed = classifyJarvisIntentRegex(rawText);
   switch(parsed.intent){
     case 'HELP': return handleHelpIntent();
     case 'GET_WEEK_SUMMARY': return handleGetWeekSummaryIntent();
